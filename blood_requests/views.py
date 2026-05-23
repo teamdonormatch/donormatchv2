@@ -8,7 +8,7 @@ from .models import BloodRequest, RequestDonorMatch
 from .serializers import (BloodRequestSerializer, BloodRequestCreateSerializer,
                            RequestDonorMatchSerializer)
 from hospitals.models import Hospital
-from core.n8n_client import n8n_client
+from core.integrations import router
 from ml_engine.engine import ml_engine
 
 logger = logging.getLogger(__name__)
@@ -38,7 +38,6 @@ def blood_requests_list_create(request):
     hospital.save()
 
     if ml_engine.should_use_autonomous_mode():
-        # AI handles it — no n8n needed
         blood_request.status        = 'ml_processing'
         blood_request.handled_by_ml = True
         blood_request.save()
@@ -54,20 +53,24 @@ def blood_requests_list_create(request):
         blood_request.save()
 
         return Response({
-            'request':     BloodRequestSerializer(blood_request).data,
-            'handled_by':  'ml',
+            'request':      BloodRequestSerializer(blood_request).data,
+            'handled_by':   'ml',
             'donors_found': len(scored),
         }, status=201)
 
-    # Fire webhook to n8n — response comes back async to /webhook/n8n/donors-found/
+    # Fan out to ALL configured sources
     blood_request.status = 'sent_to_n8n'
     blood_request.save()
-    n8n_client.send_blood_request(blood_request, hospital)
+
+    results = router.send_blood_request(blood_request, hospital)
+    fired   = sum(1 for v in results.values() if v)
 
     return Response({
-        'request':    BloodRequestSerializer(blood_request).data,
-        'handled_by': 'n8n',
-        'message':    'Request sent to N8N. Donors will appear once N8N responds.',
+        'request':      BloodRequestSerializer(blood_request).data,
+        'handled_by':   'sources',
+        'sources_fired': fired,
+        'source_results': results,
+        'message':      f'Request sent to {fired} source(s). Donors will appear once they respond.',
     }, status=201)
 
 
@@ -98,11 +101,6 @@ def request_donors(request, pk):
 @api_view(['POST'])
 @permission_classes([IsAuthenticated])
 def check_donor_availability(request, pk, match_id):
-    """
-    Fires webhook to n8n asking it to contact donor.
-    N8N calls back to /webhook/n8n/availability-result/ when donor responds.
-    Frontend polls every 4s for the status change.
-    """
     try:
         br    = BloodRequest.objects.get(pk=pk, hospital=request.user.hospital)
         match = RequestDonorMatch.objects.get(pk=match_id, request=br)
@@ -112,11 +110,14 @@ def check_donor_availability(request, pk, match_id):
     match.status = 'availability_checking'
     match.save()
 
-    n8n_client.request_availability_check(match)
+    results = router.request_availability_check(match)
+    fired   = sum(1 for v in results.values() if v)
 
     return Response({
-        'match':   RequestDonorMatchSerializer(match).data,
-        'message': 'Availability check sent to N8N. Result updates automatically.',
+        'match':          RequestDonorMatchSerializer(match).data,
+        'sources_fired':  fired,
+        'source_results': results,
+        'message':        'Availability check sent. Donor card updates automatically when a source responds.',
     })
 
 

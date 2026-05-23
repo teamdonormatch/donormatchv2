@@ -8,7 +8,7 @@ from .models import Payment
 from .serializers import PaymentSerializer, PaymentCreateSerializer
 from blood_requests.models import BloodRequest, RequestDonorMatch
 from blood_requests.serializers import BloodRequestSerializer
-from core.n8n_client import n8n_client
+from core.integrations import router
 from ml_engine.engine import ml_engine
 
 logger = logging.getLogger(__name__)
@@ -66,13 +66,14 @@ def confirm_payment(request, request_id):
     br.status = 'payment_confirmed'
     br.save()
 
-    # Fire webhook to n8n — notify donor, no callback needed
-    n8n_client.notify_selected_donor(
+    # Notify donor via ALL configured sources
+    results = router.notify_selected_donor(
         donor=payment.donor,
         hospital=request.user.hospital,
         amount=payment.amount,
         reference=reference,
     )
+    logger.info(f'notify_donor results for request {request_id}: {results}')
 
     return Response(PaymentSerializer(payment).data)
 
@@ -105,6 +106,16 @@ def close_session(request, request_id):
         'request': BloodRequestSerializer(br).data,
     })
 
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def payment_detail(request, request_id):
+    try:
+        br      = BloodRequest.objects.get(pk=request_id, hospital=request.user.hospital)
+        payment = br.payment
+    except (BloodRequest.DoesNotExist, Exception):
+        return Response({'error': 'Not found'}, status=404)
+    return Response(PaymentSerializer(payment).data)
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])

@@ -166,10 +166,15 @@ TIME_ZONE = 'Africa/Lagos'
 USE_I18N = True
 USE_TZ = True
 
-# ── N8N Integration ───────────────────────────────────────────
-N8N_WEBHOOK_URL = os.environ.get('N8N_WEBHOOK_URL', 'https://your-n8n-instance.com/webhook')
-N8N_API_KEY = os.environ.get('N8N_API_KEY', '')
+# ── Integration Sources ───────────────────────────────────────
+# Sources are configured via SOURCE_N_* env vars (see .env.example)
+# The app fans out to ALL enabled sources simultaneously.
+# No hardcoded URLs — everything is env-driven and hot-reloadable.
 BASE_URL = os.environ.get('BASE_URL', 'http://localhost:8000')
+
+# Legacy single-source fallback — still works if set
+# Maps to SOURCE_1_* automatically via .env.example
+N8N_WEBHOOK_URL = os.environ.get('N8N_WEBHOOK_URL', '')
 
 # ── ML Engine ─────────────────────────────────────────────────
 ML_MODEL_PATH = BASE_DIR / 'ml_models'
