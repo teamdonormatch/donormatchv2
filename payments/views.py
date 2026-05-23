@@ -8,7 +8,7 @@ from .models import Payment
 from .serializers import PaymentSerializer, PaymentCreateSerializer
 from blood_requests.models import BloodRequest, RequestDonorMatch
 from blood_requests.serializers import BloodRequestSerializer
-from core.integrations import router
+from core.n8n_client import send_to_n8n
 from ml_engine.engine import ml_engine
 
 logger = logging.getLogger(__name__)
@@ -32,10 +32,8 @@ def initiate_payment(request, request_id):
 
     donor = match.donor
     payment = serializer.save(
-        request=br,
-        match=match,
-        hospital=request.user.hospital,
-        donor=donor,
+        request=br, match=match,
+        hospital=request.user.hospital, donor=donor,
         recipient_bank=donor.bank_name,
         recipient_account=donor.account_number,
         recipient_name=donor.account_name,
@@ -66,16 +64,17 @@ def confirm_payment(request, request_id):
     br.status = 'payment_confirmed'
     br.save()
 
-    # Notify donor via ALL configured sources
-    results = router.notify_selected_donor(
-        donor=payment.donor,
-        hospital=request.user.hospital,
-        amount=payment.amount,
-        reference=reference,
-    )
-    logger.info(f'notify_donor results for request {request_id}: {results}')
+    result = send_to_n8n({
+        'action':            'notify_donor',
+        'donor_name':        f'{payment.donor.first_name} {payment.donor.last_name}',
+        'donor_phone':       payment.donor.phone,
+        'hospital_name':     request.user.hospital.name,
+        'hospital_address':  request.user.hospital.address,
+        'payment_amount':    str(payment.amount),
+        'payment_reference': reference,
+    })
 
-    return Response(PaymentSerializer(payment).data)
+    return Response({**PaymentSerializer(payment).data, 'n8n': result})
 
 
 @api_view(['POST'])
@@ -101,21 +100,8 @@ def close_session(request, request_id):
     except RequestDonorMatch.DoesNotExist:
         pass
 
-    return Response({
-        'message': 'Session closed successfully',
-        'request': BloodRequestSerializer(br).data,
-    })
+    return Response({'message': 'Session closed', 'request': BloodRequestSerializer(br).data})
 
-
-@api_view(['GET'])
-@permission_classes([IsAuthenticated])
-def payment_detail(request, request_id):
-    try:
-        br      = BloodRequest.objects.get(pk=request_id, hospital=request.user.hospital)
-        payment = br.payment
-    except (BloodRequest.DoesNotExist, Exception):
-        return Response({'error': 'Not found'}, status=404)
-    return Response(PaymentSerializer(payment).data)
 
 @api_view(['GET'])
 @permission_classes([IsAuthenticated])

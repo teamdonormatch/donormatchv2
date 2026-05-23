@@ -8,7 +8,7 @@ from .models import BloodRequest, RequestDonorMatch
 from .serializers import (BloodRequestSerializer, BloodRequestCreateSerializer,
                            RequestDonorMatchSerializer)
 from hospitals.models import Hospital
-from core.integrations import router
+from core.n8n_client import send_to_n8n
 from ml_engine.engine import ml_engine
 
 logger = logging.getLogger(__name__)
@@ -37,11 +37,25 @@ def blood_requests_list_create(request):
     hospital.total_requests += 1
     hospital.save()
 
+    # Build the exact payload the hackathon needs
+    payload = {
+        "hospital_id":       hospital.license_number or str(hospital.id),
+        "blood_group":       blood_request.blood_group,
+        "urgency_level":     blood_request.urgency,
+        "units_required":    blood_request.units_needed,
+        "patient_condition": blood_request.patient_condition or blood_request.urgency,
+        # extra context N8N can use
+        "request_id":        blood_request.id,
+        "hospital_name":     hospital.name,
+        "hospital_city":     hospital.city,
+        "hospital_phone":    hospital.phone,
+        "callback_url":      f'{__import__("django.conf", fromlist=["settings"]).settings.BASE_URL}/webhook/inbound/donors-found/',
+    }
+
     if ml_engine.should_use_autonomous_mode():
         blood_request.status        = 'ml_processing'
         blood_request.handled_by_ml = True
         blood_request.save()
-
         scored = ml_engine.find_best_donors(blood_request, limit=10)
         for donor, score in scored:
             RequestDonorMatch.objects.create(
@@ -51,26 +65,30 @@ def blood_requests_list_create(request):
         blood_request.status              = 'donors_found'
         blood_request.ml_confidence_score = scored[0][1] if scored else 0
         blood_request.save()
-
         return Response({
             'request':      BloodRequestSerializer(blood_request).data,
             'handled_by':   'ml',
+            'n8n':          {'success': False, 'note': 'ML autonomous mode — N8N not needed'},
             'donors_found': len(scored),
         }, status=201)
 
-    # Fan out to ALL configured sources
+    # Send to N8N
     blood_request.status = 'sent_to_n8n'
     blood_request.save()
 
-    results = router.send_blood_request(blood_request, hospital)
-    fired   = sum(1 for v in results.values() if v)
+    result = send_to_n8n(payload)
+
+    if result['success']:
+        blood_request.status = 'sent_to_n8n'
+    else:
+        blood_request.status = 'failed'
+
+    blood_request.save()
 
     return Response({
-        'request':      BloodRequestSerializer(blood_request).data,
-        'handled_by':   'sources',
-        'sources_fired': fired,
-        'source_results': results,
-        'message':      f'Request sent to {fired} source(s). Donors will appear once they respond.',
+        'request':    BloodRequestSerializer(blood_request).data,
+        'n8n':        result,
+        'payload_sent': payload,
     }, status=201)
 
 
@@ -110,14 +128,18 @@ def check_donor_availability(request, pk, match_id):
     match.status = 'availability_checking'
     match.save()
 
-    results = router.request_availability_check(match)
-    fired   = sum(1 for v in results.values() if v)
+    result = send_to_n8n({
+        'action':      'check_availability',
+        'match_id':    match.id,
+        'donor_phone': match.donor.phone,
+        'donor_name':  f'{match.donor.first_name} {match.donor.last_name}',
+        'blood_group': match.donor.blood_group,
+        'callback_url': f'{__import__("django.conf", fromlist=["settings"]).settings.BASE_URL}/webhook/inbound/availability-result/',
+    })
 
     return Response({
-        'match':          RequestDonorMatchSerializer(match).data,
-        'sources_fired':  fired,
-        'source_results': results,
-        'message':        'Availability check sent. Donor card updates automatically when a source responds.',
+        'match':  RequestDonorMatchSerializer(match).data,
+        'n8n':    result,
     })
 
 
@@ -147,3 +169,4 @@ def select_donor(request, pk, match_id):
             'account_name':   match.donor.account_name,
         }
     })
+

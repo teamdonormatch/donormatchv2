@@ -142,4 +142,3 @@ def availability_result(request):
 
     logger.info(f'availability_result webhook: match {match_id} — available={is_available}')
     return JsonResponse({'status': 'ok', 'match_id': match_id, 'available': is_available})
-
