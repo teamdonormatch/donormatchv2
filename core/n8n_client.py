@@ -28,4 +28,3 @@ def send_to_n8n(payload):
     except Exception as e:
         logger.error(f'N8N unexpected error: {e}')
         return {'success': False, 'error': str(e)}
-
